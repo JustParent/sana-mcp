@@ -18,7 +18,7 @@ import time
 from typing import Any, Callable
 
 from . import views
-from .auth import catalog_ttl
+from .auth import catalog_budget, catalog_ttl
 from .client import get_paginated
 
 CONTENT_TYPES = ("course", "path", "program")
@@ -39,6 +39,10 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _cache: dict[str, dict[str, Any]] = {}
 _cache_lock = threading.Lock()
+
+# One fetch lock per content type. Tool calls run on a thread pool, so without
+# this two concurrent searches on a cold cache would each download the catalog.
+_fetch_locks: dict[str, threading.Lock] = {t: threading.Lock() for t in CONTENT_TYPES}
 
 
 def parse_content_types(raw: str | None) -> list[str]:
@@ -153,11 +157,17 @@ def filter_by_tags(items: list[dict[str, Any]], tags: list[str] | None) -> list[
     return kept
 
 
-def _fetch_catalog(content_type: str, fetch: Callable[..., Any]) -> dict[str, Any]:
+def _fetch_catalog(
+    content_type: str,
+    fetch: Callable[..., Any],
+    *,
+    deadline: float | None = None,
+    now: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
     """Fetch and trim one content type's full catalog."""
     path, viewer = _ENDPOINTS[content_type]
     items, truncated = get_paginated(
-        path, max_pages=views.MAX_CATALOG_PAGES, fetch=fetch
+        path, max_pages=views.MAX_CATALOG_PAGES, fetch=fetch, deadline=deadline, now=now
     )
     trimmed = []
     for item in items:
@@ -165,7 +175,7 @@ def _fetch_catalog(content_type: str, fetch: Callable[..., Any]) -> dict[str, An
         if view:
             view["contentType"] = content_type
             trimmed.append(view)
-    return {"items": trimmed, "fetched_at": time.monotonic(), "truncated": truncated}
+    return {"items": trimmed, "fetched_at": now(), "truncated": truncated}
 
 
 def get_catalog(
@@ -177,6 +187,11 @@ def get_catalog(
 ) -> tuple[list[dict[str, Any]], bool]:
     """Return the cached content catalog, fetching any stale or missing types.
 
+    A cold fetch is bounded by ``SANA_CATALOG_BUDGET``: when it runs out, the
+    types fetched so far are kept and cached, and the shortfall is reported
+    rather than hidden, so a slow Sana yields a partial answer instead of a tool
+    call that blocks until the host kills it.
+
     Args:
         content_types: Which types to include.
         refresh: Bypass the cache and refetch.
@@ -184,33 +199,53 @@ def get_catalog(
         now: Injected clock, for tests.
 
     Returns:
-        ``(items, truncated)`` where ``truncated`` is True if any type hit the
-        page bound and so may be missing content.
+        ``(items, truncated_types)`` — ``truncated_types`` names the content
+        types that may be missing records, and is empty when the catalog is
+        complete.
     """
     from .client import execute  # Imported lazily so tests can run without httpx setup.
 
     fetch = fetch or execute
     ttl = catalog_ttl()
+    deadline = now() + catalog_budget()
     items: list[dict[str, Any]] = []
-    truncated = False
+    truncated_types: list[str] = []
 
     for content_type in content_types:
-        with _cache_lock:
-            entry = _cache.get(content_type)
-            fresh = (
-                entry is not None
-                and not refresh
-                and (now() - entry["fetched_at"]) < ttl
-            )
-        if not fresh:
-            entry = _fetch_catalog(content_type, fetch)
-            with _cache_lock:
-                _cache[content_type] = entry
+        entry = _cached_entry(content_type, ttl=ttl, refresh=refresh, now=now)
+
+        if entry is None:
+            lock = _fetch_locks.setdefault(content_type, threading.Lock())
+            with lock:
+                # Another thread may have fetched this type while we waited.
+                # An explicit refresh still refetches — it means "get me current
+                # data", not "get me whatever just landed".
+                entry = _cached_entry(content_type, ttl=ttl, refresh=refresh, now=now)
+                if entry is None:
+                    entry = _fetch_catalog(
+                        content_type, fetch, deadline=deadline, now=now
+                    )
+                    with _cache_lock:
+                        _cache[content_type] = entry
 
         items.extend(entry["items"])
-        truncated = truncated or bool(entry["truncated"])
+        if entry["truncated"]:
+            truncated_types.append(content_type)
 
-    return items, truncated
+    return items, truncated_types
+
+
+def _cached_entry(
+    content_type: str, *, ttl: float, refresh: bool, now: Callable[[], float]
+) -> dict[str, Any] | None:
+    """Return the cached entry for a content type when it is still fresh."""
+    if refresh:
+        return None
+    with _cache_lock:
+        entry = _cache.get(content_type)
+        if entry is not None and (now() - entry["fetched_at"]) < ttl:
+            return entry
+    return None
 
 
 def find_courses(course_ids: list[str], *, fetch: Callable[..., Any] | None = None) -> dict[str, dict[str, Any]]:
@@ -223,12 +258,12 @@ def find_courses(course_ids: list[str], *, fetch: Callable[..., Any] | None = No
     Returns:
         Mapping of course id to its trimmed view (missing ids are absent).
     """
-    items, _ = get_catalog(["course"], fetch=fetch)
+    items, _unused = get_catalog(["course"], fetch=fetch)
     wanted = set(course_ids)
     return {item["id"]: item for item in items if item.get("id") in wanted}
 
 
 def clear_cache() -> None:
-    """Drop the cached catalog (used between tests and by ``refresh=True``)."""
+    """Drop the cached catalog (used between tests)."""
     with _cache_lock:
         _cache.clear()

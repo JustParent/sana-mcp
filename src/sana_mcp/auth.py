@@ -18,7 +18,14 @@ import time
 from typing import Callable
 
 DEFAULT_SCOPE = "read,write"
-DEFAULT_CATALOG_TTL = 300.0
+
+# Long enough that a working session normally fetches the catalog once: MCP
+# hosts keep this process warm for minutes, and learning catalogs change slowly.
+DEFAULT_CATALOG_TTL = 900.0
+
+# Wall-clock ceiling on fetching the catalog, so a slow Sana degrades to partial
+# results instead of blocking past the host's tool-call deadline.
+DEFAULT_CATALOG_BUDGET = 15.0
 
 # Refresh this many seconds before the token actually expires, so a long-running
 # request never races the expiry.
@@ -126,14 +133,24 @@ def scope() -> str:
 
 
 def catalog_ttl() -> float:
-    """Return the search-catalog cache TTL in seconds (default 300)."""
-    raw = _first_env("SANA_CATALOG_TTL")
+    """Return the search-catalog cache TTL in seconds (default 900)."""
+    return _positive_float_env("SANA_CATALOG_TTL", DEFAULT_CATALOG_TTL)
+
+
+def catalog_budget() -> float:
+    """Return the wall-clock budget for fetching the catalog (default 15s)."""
+    return _positive_float_env("SANA_CATALOG_BUDGET", DEFAULT_CATALOG_BUDGET)
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    """Read a non-negative float from the environment, falling back on junk."""
+    raw = _first_env(name)
     if not raw:
-        return DEFAULT_CATALOG_TTL
+        return default
     try:
         return max(0.0, float(raw))
     except ValueError:
-        return DEFAULT_CATALOG_TTL
+        return default
 
 
 class TokenCache:

@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The range pyproject.toml promises with requires-python = ">=3.10".
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install -e ".[dev]"
+
+      - name: Run tests
+        # Fully offline: no network access and no Sana credentials required.
+        run: uv run pytest -q
+
+  package:
+    # Proves the launch path a host actually uses: a cold install straight from
+    # git, resolving dependencies from scratch, then starting over stdio.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build wheel and sdist
+        run: uv build
+
+      - name: Cold-install from git and start the server
+        # Clones the checked-out commit. The server logs its missing-credentials
+        # error to stderr and exits 0 when stdin closes, so a non-zero exit here
+        # means packaging or the entry point is broken.
+        run: timeout 300 uvx --from "git+file://$PWD" sana-mcp </dev/null

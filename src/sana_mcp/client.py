@@ -260,8 +260,16 @@ def get_paginated(
     max_pages: int,
     page_limit: int = 1000,
     fetch: Callable[..., Any] = execute,
+    deadline: float | None = None,
+    now: Callable[[], float] = time.monotonic,
 ) -> tuple[list[Any], bool]:
     """Follow Sana's cursor pagination up to a bounded number of pages.
+
+    Pages are inherently sequential — each request needs the previous page's
+    cursor — so a large collection costs one round trip per page. Both
+    ``max_pages`` and ``deadline`` bound that cost; whichever is reached first
+    stops the walk and reports the result as truncated rather than leaving it
+    silently incomplete.
 
     Args:
         path: API path to page through.
@@ -269,6 +277,8 @@ def get_paginated(
         max_pages: Hard bound on pages fetched, so output stays finite.
         page_limit: Page size requested (Sana allows up to 1000).
         fetch: Injected for testing; defaults to :func:`execute`.
+        deadline: Monotonic timestamp after which no further page is started.
+        now: Injected clock, for tests.
 
     Returns:
         ``(items, truncated)`` where ``truncated`` is True if more pages remain.
@@ -276,7 +286,13 @@ def get_paginated(
     items: list[Any] = []
     cursor: str | None = None
 
-    for _ in range(max(1, max_pages)):
+    for page in range(max(1, max_pages)):
+        # Never start a page there is no budget to finish; the caller keeps
+        # whatever has already been collected. The first page always runs, so
+        # every content type contributes something.
+        if page and deadline is not None and now() >= deadline:
+            return items, True
+
         page_params = dict(params or {})
         page_params["limit"] = page_limit
         if cursor:

@@ -11,6 +11,7 @@ import pytest
 from sana_mcp.auth import (
     AuthError,
     TokenCache,
+    catalog_budget,
     catalog_ttl,
     client_id,
     client_secret,
@@ -73,7 +74,7 @@ def test_missing_credentials_name_the_fix():
 
 def test_scope_and_ttl_defaults(monkeypatch):
     assert scope() == "read,write"
-    assert catalog_ttl() == 300.0
+    assert catalog_ttl() == 900.0
 
     monkeypatch.setenv("SANA_SCOPE", "read")
     monkeypatch.setenv("SANA_CATALOG_TTL", "60")
@@ -81,7 +82,17 @@ def test_scope_and_ttl_defaults(monkeypatch):
     assert catalog_ttl() == 60.0
 
     monkeypatch.setenv("SANA_CATALOG_TTL", "not-a-number")
-    assert catalog_ttl() == 300.0
+    assert catalog_ttl() == 900.0
+
+
+def test_catalog_budget_default_and_override(monkeypatch):
+    assert catalog_budget() == 15.0
+
+    monkeypatch.setenv("SANA_CATALOG_BUDGET", "5")
+    assert catalog_budget() == 5.0
+
+    monkeypatch.setenv("SANA_CATALOG_BUDGET", "junk")
+    assert catalog_budget() == 15.0
 
 
 class FakeClock:

@@ -84,11 +84,13 @@ def sana_search_content(
     limit: int = 25,
     refresh: bool = False,
 ) -> dict[str, Any]:
-    """Search the Sana catalog to ground an answer in real learning content. (0-15 API calls; cached ~5 min.)
+    """Search the Sana catalog to ground an answer in real learning content. (0-15 API calls; cached ~15 min.)
 
     The Sana API has no search endpoint, so this fetches the catalog once, caches
-    it in-process for about five minutes, and ranks locally: a title match beats
-    a tag match, which beats a description match.
+    it in-process for about fifteen minutes, and ranks locally: a title match
+    beats a tag match, which beats a description match. The first search of a
+    session pays for the fetch — a few seconds on a large catalog — and later
+    ones are served from memory.
 
     Use it whenever a question is about what training exists ("do we have
     anything on giving feedback?"), before recommending or assigning content, and
@@ -111,18 +113,21 @@ def sana_search_content(
 
     Returns:
         ``{results: [{id, title, description, contentType, tags?, link?, score?}],
-        count, catalogTruncated?, cacheRefreshed?}``.
+        count, catalogTruncated?, truncatedTypes?, cacheRefreshed?}``.
+        ``truncatedTypes`` names content types whose catalog was cut short, so
+        results for those may be incomplete.
     """
     types = search_mod.parse_content_types(content_types)
     capped = max(1, min(int(limit), views.MAX_SEARCH_RESULTS))
 
-    items, truncated = search_mod.get_catalog(types, refresh=bool(refresh))
+    items, truncated_types = search_mod.get_catalog(types, refresh=bool(refresh))
     items = search_mod.filter_by_tags(items, tags)
     results = search_mod.rank_items(items, query, capped)
 
     payload: dict[str, Any] = {"results": results, "count": len(results)}
-    if truncated:
+    if truncated_types:
         payload["catalogTruncated"] = True
+        payload["truncatedTypes"] = truncated_types
     if refresh:
         payload["cacheRefreshed"] = True
     return payload
@@ -135,11 +140,13 @@ def sana_get_content(
     include_courses: bool = True,
     raw: bool = False,
 ) -> dict[str, Any]:
-    """Get the full details of one course, path, or program. (1-4 API calls.)
+    """Get the full details of one course, path, or program. (1-6 API calls; catalog cached.)
 
     For a path this also resolves the courses it contains into summaries, which
     is the usual follow-up to ``sana_search_content`` when someone asks what a
-    programme actually covers.
+    programme actually covers. Those summaries come from the shared content
+    catalog: free when it is warm (the usual case, straight after a search),
+    but a cold catalog costs a fetch of up to five pages.
 
     Args:
         content_type: ``course``, ``path``, or ``program``.
@@ -611,7 +618,7 @@ def sana_update_user(
     manager: str | None = None,
     remove_manager: bool = False,
 ) -> dict[str, Any]:
-    """Update a user's profile, status, or manager. (1-3 API calls.)
+    """Update a user's profile, status, or manager. (1-4 API calls.)
 
     This is a write operation covering the whole "change this person's record"
     job: profile fields, deactivation, and the reporting line, which Sana exposes
@@ -1082,7 +1089,7 @@ def sana_update_teamspace_members(
         str, Field(description="viewer, commenter, editor, or owner")
     ] = "viewer",
 ) -> dict[str, Any]:
-    """Add or remove teamspace members. (1-22 API calls.)
+    """Add or remove teamspace members. (1-42 API calls; max 20 each way.)
 
     This is a write operation; removals revoke access to the teamspace's content.
 
@@ -1148,7 +1155,7 @@ def sana_run_insights_query(
     output_format: Annotated[str, Field(description="csv or xlsx")] = "csv",
     wait_seconds: int = 10,
 ) -> dict[str, Any]:
-    """Run a read-only SQL query against Sana's analytics warehouse. (2-8 API calls.)
+    """Run a read-only SQL query against Sana's analytics warehouse. (2-12 API calls.)
 
     Use this for questions the fixed reports cannot answer — completion rates by
     group, progress over time, and similar. Sana runs the query as a job and
@@ -1195,7 +1202,7 @@ def sana_run_learner_progress_report(
     output_format: Annotated[str, Field(description="csv or xlsx")] = "csv",
     wait_seconds: int = 10,
 ) -> dict[str, Any]:
-    """Run Sana's built-in learner-progress report — who completed what. (3-9 API calls.)
+    """Run Sana's built-in learner-progress report — who completed what. (3-13 API calls.)
 
     The quickest route to "how is my team doing on their training". Prefer this
     over ``sana_run_insights_query`` when the standard progress export answers

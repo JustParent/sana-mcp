@@ -17,8 +17,9 @@ When someone asks what training exists on a topic, **always search before answer
 
 Notes:
 
-- Search is local ranking over a cached catalog, so results can be up to five minutes stale. If someone says "I just published it", retry with `refresh=True`.
-- `catalogTruncated: true` means the catalog is larger than the fetch bound; narrow with `content_types` or `tags`.
+- Search is local ranking over a cached catalog, so results can be up to fifteen minutes stale. If someone says "I just published it", retry with `refresh=True`.
+- The first search of a session fetches the catalog and can take a few seconds; later searches are instant. Search once and reuse the ids.
+- `catalogTruncated: true` means the catalog was cut short by the page bound or the fetch budget, and `truncatedTypes` says which types. Results for those types may be incomplete — say so rather than concluding the content doesn't exist, and narrow with `content_types` or `tags`.
 - No query at all lists the catalog alphabetically — useful for "what do we have?" browsing.
 
 ## What's on someone's plate

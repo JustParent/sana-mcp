@@ -1,5 +1,7 @@
 # sana-mcp
 
+[![tests](https://github.com/justparent/sana-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/justparent/sana-mcp/actions/workflows/tests.yml)
+
 A `uvx`-runnable MCP server for the [Sana](https://sana.ai) learning platform API, designed around the jobs people actually ask an assistant to do:
 
 - **Ground answers in real learning content** — search the course, path, and program catalog and cite what exists, instead of inventing training that doesn't.
@@ -13,12 +15,21 @@ Every tool makes a **bounded number of API calls** (stated in its description) a
 
 ## Why search works the way it does
 
-Sana's public API has no search endpoint. To answer "do we have anything on giving feedback?", this server fetches the content catalog (courses, paths, programs), caches it in-process for about five minutes, and ranks it locally: an exact phrase in a title beats a title word, which beats a tag, which beats a description match.
+Sana's public API has no search endpoint. To answer "do we have anything on giving feedback?", this server fetches the content catalog (courses, paths, programs), caches it in-process, and ranks it locally: an exact phrase in a title beats a title word, which beats a tag, which beats a description match.
 
-Two consequences worth knowing:
+Pages are cursor-based and therefore strictly sequential, so a cold catalog costs one round trip per page. Ranking itself is cheap — 15,000 records rank in well under a second and occupy about 8MB — so the cost is entirely network:
 
-- Search results can be **up to five minutes stale**. Pass `refresh=true` to `sana_search_content` right after publishing content.
-- Very large catalogs are capped at 5 pages of 1000 records per content type. When that bound is hit the result carries `catalogTruncated: true`.
+| Catalog | Cold (first search) | Warm |
+|---|---|---|
+| ~300 courses | ~4 requests, a few seconds | ~10ms |
+| ~5,000 courses | ~8 requests | ~200ms |
+| At the page cap | 15 requests | under a second |
+
+Consequences worth knowing:
+
+- The **first search of a session pays for the fetch**; later ones are served from memory for `SANA_CATALOG_TTL` (default 15 minutes).
+- Results can be up to that stale. Pass `refresh=true` to `sana_search_content` right after publishing content.
+- Fetching stops at `SANA_CATALOG_BUDGET` (default 15s) or 5 pages of 1000 records per type, whichever comes first. Either way the response carries `catalogTruncated: true` and `truncatedTypes` naming what may be incomplete, and the partial catalog is cached rather than discarded — a slow Sana degrades to a partial answer instead of a tool call that hangs until the host kills it.
 
 ## 1. Sana API client setup (one time)
 
@@ -72,7 +83,8 @@ Run `sana_check_connection` first — it verifies credentials and connectivity i
 | `SANA_CLIENT_ID` | *(required)* | OAuth2 client ID from Sana's API settings |
 | `SANA_CLIENT_SECRET` | *(required)* | OAuth2 client secret |
 | `SANA_SCOPE` | `read,write` | Token scope. Set to `read` to deploy read-only — write tools then fail with a clear 403 |
-| `SANA_CATALOG_TTL` | `300` | Seconds the content catalog is cached for search |
+| `SANA_CATALOG_TTL` | `900` | Seconds the content catalog is cached for search |
+| `SANA_CATALOG_BUDGET` | `15` | Wall-clock seconds allowed for a cold catalog fetch before it returns partial results |
 
 > `SANA_DOMAIN` also accepts the aliases `SANA_BASE_URL` / `SANA_URL`, and the credentials accept `CLIENT_ID` / `CLIENT_SECRET`. The `SANA_*` names win when both are set.
 
@@ -118,7 +130,7 @@ Notes:
 | Tool | Purpose | API calls |
 |---|---|---|
 | `sana_search_content(query?, content_types?, tags?, limit?, refresh?)` | Search/browse the catalog; the entry point for grounding answers | 0–15 (cached) |
-| `sana_get_content(content_type, content_id, include_courses?, raw?)` | Full details of a course/path/program; resolves a path's courses | 1–4 |
+| `sana_get_content(content_type, content_id, include_courses?, raw?)` | Full details of a course/path/program; resolves a path's courses | 1–6 (cached) |
 
 ### People (read)
 
@@ -151,7 +163,7 @@ Notes:
 | Tool | Purpose | API calls | Destructive |
 |---|---|---|---|
 | `sana_create_user(email, first_name?, last_name?, role?, language?)` | Create a user | 1 | |
-| `sana_update_user(user, …, disabled?, manager?, remove_manager?)` | Update profile, deactivate, set/clear manager | 1–3 | |
+| `sana_update_user(user, …, disabled?, manager?, remove_manager?)` | Update profile, deactivate, set/clear manager | 1–4 | |
 | `sana_invite_user(user, method?)` | Send an invite email or mint an invite link | 1–2 | |
 | `sana_delete_user(user)` | Delete a user and their history | 1–2 | ✅ |
 | `sana_create_group(name, group_type?)` | Create a group | 1 | |
@@ -165,7 +177,7 @@ Notes:
 | `sana_upsert_link_courses(courses)` | Sync up to 100 link courses by `externalId` | 1 | |
 | `sana_delete_course(course_id)` | Delete a course and its completions | 1 | ✅ |
 | `sana_create_teamspace(name, is_private?, owner?, default_role?)` | Create a teamspace | 1–2 | |
-| `sana_update_teamspace_members(teamspace_id, add?, remove?, role?)` | Add/remove teamspace members | 1–22 | ✅ (removals) |
+| `sana_update_teamspace_members(teamspace_id, add?, remove?, role?)` | Add/remove teamspace members | 1–42 | ✅ (removals) |
 | `sana_delete_teamspace(teamspace_id)` | Delete an API-managed teamspace | 1 | ✅ |
 
 > `sana_update_user(disabled=True)` deactivates someone reversibly — prefer it over `sana_delete_user`.
@@ -174,8 +186,8 @@ Notes:
 
 | Tool | Purpose | API calls |
 |---|---|---|
-| `sana_run_insights_query(sql, output_format?, wait_seconds?)` | Custom read-only SQL against the analytics warehouse | 2–8 |
-| `sana_run_learner_progress_report(content_types?, group_ids?, content_ids?, assignment_type?, output_format?, wait_seconds?)` | Built-in progress export | 3–9 |
+| `sana_run_insights_query(sql, output_format?, wait_seconds?)` | Custom read-only SQL against the analytics warehouse | 2–12 |
+| `sana_run_learner_progress_report(content_types?, group_ids?, content_ids?, assignment_type?, output_format?, wait_seconds?)` | Built-in progress export | 3–13 |
 | `sana_get_report_job(job_id, report_id?)` | Poll a job and collect its download link | 1 |
 
 > Reports are asynchronous. Both run tools poll for up to 20 seconds and then hand back a `jobId` — continue with `sana_get_report_job` rather than re-running the report. Download links expire.
@@ -228,7 +240,9 @@ uv run pytest
 uv build
 ```
 
-The test suite runs entirely offline — no network, no credentials.
+The test suite runs entirely offline — no network, no credentials. It includes `tests/test_stdio_protocol.py`, which spawns the server as a subprocess and speaks real JSON-RPC to it, covering what in-process tests cannot: that stdout carries protocol traffic and nothing else, and that a failed tool call leaves the process healthy.
+
+CI (`.github/workflows/tests.yml`) runs the suite against Python 3.10–3.13 and separately cold-installs the package from git with `uvx` — the same launch path a host uses — so packaging and entry-point breakage surface before deployment.
 
 See `example_skill/SKILL.md` for a ready-to-use Claude Skill carrying the multi-step recipes.
 
@@ -247,9 +261,10 @@ See `example_skill/SKILL.md` for a ready-to-use Claude Skill carrying the multi-
 - **"SANA_DOMAIN is not set"** — the server starts but every tool fails. Set `SANA_DOMAIN`, `SANA_CLIENT_ID`, and `SANA_CLIENT_SECRET` in the MCP client's `env` block. The startup line on stderr shows what was resolved.
 - **"Sana rejected the client credentials (HTTP 401 from /api/token)"** — the client ID/secret is wrong, or the API client is disabled in Sana.
 - **403 on a write tool** — the token scope is read-only. Set `SANA_SCOPE=read,write` and ensure the API client has write permission.
-- **Newly published content missing from search** — the catalog cache is up to 5 minutes old. Call `sana_search_content(refresh=true)`.
+- **Newly published content missing from search** — the catalog cache is up to `SANA_CATALOG_TTL` (15 min) old. Call `sana_search_content(refresh=true)`.
 - **A report comes back `pending`** — that's normal for large exports. Poll `sana_get_report_job(job_id)`; re-running the report starts the work over.
-- **`catalogTruncated: true`** — the catalog exceeds the page bound. Narrow with `content_types` or `tags`.
+- **`catalogTruncated: true`** — the catalog hit the page bound or the fetch budget; `truncatedTypes` names which types. Narrow with `content_types` or `tags`, or raise `SANA_CATALOG_BUDGET` if the API is simply slow.
+- **The first search is slow** — that's the cold catalog fetch, once per session. Subsequent searches are served from memory.
 
 ## License
 
