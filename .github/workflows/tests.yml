@@ -1,7 +1,10 @@
 name: tests
 
 on:
+  # Branch pushes are covered by their pull request; listing both would run
+  # everything twice on a branch that has one open.
   push:
+    branches: [master]
   pull_request:
 
 permissions:
@@ -50,7 +53,8 @@ jobs:
         run: uv build
 
       - name: Cold-install from git and start the server
-        # Clones the checked-out commit. The server logs its missing-credentials
-        # error to stderr and exits 0 when stdin closes, so a non-zero exit here
-        # means packaging or the entry point is broken.
-        run: timeout 300 uvx --from "git+file://$PWD" sana-mcp </dev/null
+        # The ref is pinned explicitly: a checkout has no refs/remotes/origin/HEAD,
+        # so uv cannot work out a default branch from a bare git+file:// URL.
+        # The server logs its missing-credentials error to stderr and exits 0 when
+        # stdin closes, so a non-zero exit means packaging or the entry point broke.
+        run: timeout 300 uvx --from "git+file://$PWD@$GITHUB_SHA" sana-mcp </dev/null
