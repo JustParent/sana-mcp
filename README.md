@@ -25,6 +25,17 @@ Pages are cursor-based and therefore strictly sequential, so a cold catalog cost
 | ~5,000 courses | ~8 requests | ~200ms |
 | At the page cap | 15 requests | under a second |
 
+Memory is not a constraint. The cache holds trimmed records, and each content type is fetched and trimmed before the next begins, so only one type's raw response is ever live:
+
+| Catalog | Peak RSS |
+|---|---|
+| Python + dependencies, before any fetch | ~53MB |
+| 300 courses | ~54MB |
+| 15,000 records | ~70MB |
+| 15,000 records with 10KB descriptions | ~141MB |
+
+The interpreter and its three dependencies dominate; a typical catalog adds under 2MB. Repeated refreshes plateau rather than grow, which matters because the process stays warm for hours. A sandbox with 512MB has ample headroom.
+
 Consequences worth knowing:
 
 - The **first search of a session pays for the fetch**; later ones are served from memory for `SANA_CATALOG_TTL` (default 15 minutes).
