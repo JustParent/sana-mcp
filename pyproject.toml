@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sana-mcp"
+version = "0.1.0"
+description = "A uvx-runnable MCP server for the Sana learning platform API, designed around real content-grounding and admin jobs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "JustParent" }]
+keywords = ["mcp", "sana", "learning", "lms", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    # Pinned to the 1.x line: 2.0 renamed FastMCP to MCPServer.
+    "mcp>=1.2.0,<2.0.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+sana-mcp = "sana_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/justparent/sana-mcp"
+Repository = "https://github.com/justparent/sana-mcp"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sana_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
